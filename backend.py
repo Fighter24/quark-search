@@ -248,19 +248,21 @@ def search_ddgs(query):
 
     rr, seen_l, fetched = [], set(), set()
 
-    # 多语言搜索查询（中文 + 英文）
+    # 多语言搜索查询（中文 + 英文），更多变体
     queries = [
         (f'{query} 夸克网盘', 'cn-zh'),
-        (f'{query} 夸克 下载', 'cn-zh'),
-        (f'{query} pan.quark.cn', 'wt-wt'),  # 全球搜索
-        (f'"{query}" quark drive download', 'wt-wt'),  # 英文搜索
+        (f'{query} 夸克网盘 4K', 'cn-zh'),
+        (f'{query} 夸克网盘 下载', 'cn-zh'),
+        (f'{query} pan.quark.cn', 'wt-wt'),
+        (f'"{query}" quark drive download', 'wt-wt'),
         (f'{query} quark pan download', 'wt-wt'),
+        (f'{query} 夸克资源', 'cn-zh'),
     ]
 
     all_res = []
     for q, region in queries:
         try:
-            results = list(DDGS().text(q, max_results=5, region=region))
+            results = list(DDGS().text(q, max_results=6, region=region))
             all_res.extend(results)
         except: continue
 
@@ -369,13 +371,49 @@ def validate_quick(results):
 #  聚合搜索
 # ══════════════════════════════════════════════════════════
 
+def search_bing(query):
+    """Bing 搜索备用源"""
+    rr, seen, encoded = [], set(), quote(query)
+    try:
+        # Bing 搜索包含夸克的资源页面
+        search_query = f'{query} 夸克网盘 site:pan.quark.cn OR site:yunpanziyuan.xyz OR site:by668.org OR site:dyyj.org OR site:pd.qq.com'
+        url = f'https://www.bing.com/search?q={quote(search_query)}&setlang=zh-cn&count=20'
+        resp = cffi_requests.get(url, headers=FETCH_HEADERS, impersonate='chrome120', timeout=10, allow_redirects=True)
+        if resp.status_code != 200 or len(resp.text) < 1000:
+            return rr
+
+        # Bing 结果通常用 cite 标签 + URL
+        soup = BeautifulSoup(resp.text, 'html.parser')
+
+        # 找所有结果链接
+        for a in soup.select('li.b_algo h2 a, .b_title a, .b_algo a'):
+            href = a.get('href', '')
+            title = a.get_text(strip=True)
+            if href and title and href not in seen:
+                seen.add(href)
+                # 直接抓取这个页面找夸克链接
+                page_results = fetch_links(href, query, 5)
+                for pr in page_results:
+                    cl = QUARK_LINK_RE.search(pr['link'])
+                    if cl:
+                        cl = cl.group(0).rstrip('/')
+                        if cl not in seen:
+                            seen.add(cl)
+                            pr['link'] = cl
+                            rr.append(pr)
+    except Exception as e:
+        print(f"Bing err: {e}")
+    return rr
+
+
 def search_all(query):
     all_r, seen = [], set()
-    with ThreadPoolExecutor(max_workers=3) as ex:
+    with ThreadPoolExecutor(max_workers=4) as ex:
         futs = {
             ex.submit(search_ddgs, query): 'ddgs',
             ex.submit(search_quark_sites, query): 'quark',
             ex.submit(search_forums, query): 'forums',
+            ex.submit(search_bing, query): 'bing',
         }
         for f in as_completed(futs, timeout=20):
             try:
