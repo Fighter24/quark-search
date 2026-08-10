@@ -422,6 +422,7 @@ async def api_search(
     q: str = Query(..., min_length=1),
     validate: bool = Query(False, description="是否校验链接（默认关闭以加速）"),
     filter_expired: bool = Query(True),
+    debug: bool = Query(False, description="返回调试信息"),
 ):
     if not q.strip(): return JSONResponse({"error": "请输入"}, 400)
 
@@ -436,12 +437,26 @@ async def api_search(
         cached['elapsed'] = round(time.time() - t0, 3)
         return JSONResponse(cached)
 
+    debug_info = {} if debug else None
+
     try:
         loop = asyncio.get_event_loop()
+
+        # 测试 ddgs
+        if debug:
+            try:
+                from ddgs import DDGS
+                t1 = time.time()
+                test_results = list(DDGS().text("test", max_results=2, region='wt-wt'))
+                debug_info['ddgs_test'] = f"OK, {len(test_results)} results in {round(time.time()-t1,1)}s"
+            except Exception as e:
+                debug_info['ddgs_test'] = f"FAIL: {str(e)[:100]}"
+
         raw = await asyncio.wait_for(loop.run_in_executor(None, search_all, query), timeout=22.0)
         results = process(raw, query)
     except asyncio.TimeoutError: results = []
-    except Exception as e: print(f"Err: {e}"); results = []
+    except Exception as e:
+        print(f"Err: {e}"); results = []
 
     if validate and results:
         results = await loop.run_in_executor(None, validate_quick, results)
@@ -463,6 +478,7 @@ async def api_search(
         },
         "results": [r.to_dict() for r in results],
     }
+    if debug_info: resp['debug'] = debug_info
     cache_set(ck, resp, ttl_minutes=15)
     return JSONResponse(resp)
 
