@@ -12,13 +12,33 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from curl_cffi import requests as cffi_requests
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi import FastAPI, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
+from starlette.middleware.base import BaseHTTPMiddleware
+import uvicorn, secrets
 
 app = FastAPI(title="夸克网盘资源搜索器")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+ACCESS_PASSWORD = os.environ.get("ACCESS_PASSWORD", "").strip()
+VALID_TOKENS = set()
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if not ACCESS_PASSWORD:
+            return await call_next(request)
+        path = request.url.path
+        if path in ("/api/health", "/api/login"):
+            return await call_next(request)
+        token = request.cookies.get("quark_token") or request.query_params.get("token")
+        if token and token in VALID_TOKENS:
+            return await call_next(request)
+        if path.startswith("/api/"):
+            return JSONResponse({"error": "unauthorized", "need_password": True}, status_code=401)
+        return HTMLResponse(LOGIN_HTML, status_code=401)
+
+app.add_middleware(AuthMiddleware)
 
 QUARK_LINK_RE = re.compile(r'https?://pan\.quark\.cn/s/[a-zA-Z0-9]+')
 FETCH_HEADERS = {
@@ -451,6 +471,65 @@ async def api_search(
 async def health():
     return {"status": "ok", "time": datetime.now().isoformat(), "uptime": "running"}
 
+@app.post("/api/login")
+async def login(request: Request):
+    try:
+        body = await request.json()
+        pwd = body.get("password", "")
+    except:
+        return JSONResponse({"error": "invalid request"}, status_code=400)
+    if not ACCESS_PASSWORD or pwd != ACCESS_PASSWORD:
+        return JSONResponse({"error": "密码错误"}, status_code=403)
+    token = secrets.token_urlsafe(32)
+    VALID_TOKENS.add(token)
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie("quark_token", token, httponly=True, max_age=86400*365, samesite="lax")
+    return resp
+
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>夸克搜 - 登录</title>
+<style>
+  :root{--bg:#08080f;--card:#141428;--input:#1a1a30;--border:#28284a;--text:#d0d0e8;--text2:#7070a0;--acc:#6c5ce7;--acc2:#a29bfe;--rad:14px}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+  .box{background:var(--card);border:1px solid var(--border);border-radius:var(--rad);padding:32px 24px;width:100%;max-width:360px;text-align:center}
+  .logo{font-size:28px;font-weight:800;background:linear-gradient(135deg,var(--acc),var(--acc2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-bottom:8px}
+  .sub{color:var(--text2);font-size:13px;margin-bottom:24px}
+  input{width:100%;background:var(--input);border:2px solid var(--border);border-radius:var(--rad);padding:12px 16px;color:var(--text);font-size:16px;outline:none;text-align:center;margin-bottom:16px;transition:.2s}
+  input:focus{border-color:var(--acc);box-shadow:0 0 0 3px rgba(108,92,231,.2)}
+  button{width:100%;background:linear-gradient(135deg,var(--acc),#5b4bd5);color:#fff;border:none;border-radius:var(--rad);padding:12px;font-size:15px;font-weight:600;cursor:pointer;transition:.15s}
+  button:active{transform:scale(.97)}
+  .err{color:#f66;font-size:12px;margin-top:12px;display:none}
+  .hint{color:var(--text2);font-size:11px;margin-top:16px}
+</style>
+</head>
+<body>
+<div class="box">
+  <div class="logo">夸克搜</div>
+  <div class="sub">请输入访问密码</div>
+  <input type="password" id="pwd" placeholder="访问密码" autofocus autocomplete="off">
+  <button onclick="login()">验证</button>
+  <div class="err" id="err">密码错误，请重试</div>
+  <div class="hint">此服务为私有工具，需密码访问</div>
+</div>
+<script>
+async function login(){
+  const p=document.getElementById('pwd').value;
+  if(!p)return;
+  try{
+    const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:p})});
+    if(r.ok){window.location.href='/'}else{document.getElementById('err').style.display='block'}
+  }catch(e){document.getElementById('err').style.display='block'}
+}
+document.getElementById('pwd').addEventListener('keydown',e=>{if(e.key==='Enter')login()});
+</script>
+</body>
+</html>"""
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
