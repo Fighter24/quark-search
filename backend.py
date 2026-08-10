@@ -471,6 +471,28 @@ async def api_search(
 async def health():
     return {"status": "ok", "time": datetime.now().isoformat(), "uptime": "running"}
 
+@app.get("/api/debug")
+async def debug():
+    """测试外网访问能力"""
+    results = {}
+    for url in [
+        "https://duckduckgo.com",
+        "https://html.duckduckgo.com",
+        "https://www.aipanso.com",
+        "https://www.pansearch.me",
+        "https://github.com",
+    ]:
+        try:
+            resp = cffi_requests.head(url, impersonate='chrome120', timeout=8, allow_redirects=True)
+            results[url] = {"ok": True, "status": resp.status_code}
+        except Exception as e:
+            results[url] = {"ok": False, "error": str(e)[:200]}
+    return JSONResponse({
+        "render_networks": results,
+        "has_password": bool(ACCESS_PASSWORD),
+        "uptime": "running",
+    })
+
 @app.post("/api/login")
 async def login(request: Request):
     try:
