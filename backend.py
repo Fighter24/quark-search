@@ -29,7 +29,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if not ACCESS_PASSWORD:
             return await call_next(request)
         path = request.url.path
-        if path in ("/api/health", "/api/login"):
+        if path in ("/api/health", "/api/login", "/api/debug"):
             return await call_next(request)
         token = request.cookies.get("quark_token") or request.query_params.get("token")
         if token and token in VALID_TOKENS:
