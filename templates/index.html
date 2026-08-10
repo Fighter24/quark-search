@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>夸克搜</title>
+<style>
+  :root {
+    --bg: #08080f; --bg2: #10101c; --card: #141428;
+    --input: #1a1a30; --border: #28284a;
+    --text: #d0d0e8; --text2: #7070a0;
+    --acc: #6c5ce7; --acc2: #a29bfe; --glow: rgba(108,92,231,.2);
+    --ok: #00d68f; --warn: #f90; --err: #f66; --info: #54a0ff;
+    --rad: 14px; --rads: 8px;
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  *,*::before,*::after { margin:0; padding:0; box-sizing:border-box; }
+  html { font-size: 16px; -webkit-text-size-adjust: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC","Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh;
+    line-height: 1.5; -webkit-font-smoothing: antialiased;
+    padding-bottom: calc(60px + var(--safe-bottom));
+  }
+
+  /* ── 顶部 ── */
+  .top { text-align:center; padding: 24px 12px 12px; }
+  .logo { font-size: 28px; font-weight: 800; letter-spacing: -0.5px;
+    background: linear-gradient(135deg, var(--acc), var(--acc2));
+    -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; }
+  .sub { color:var(--text2); font-size:12px; margin-top:2px; }
+
+  /* ── 搜索栏 - 固定在顶部 ── */
+  .search-bar { position:sticky; top:0; z-index:50; background:var(--bg);
+    padding:8px 14px 12px; max-width:600px; margin:0 auto; }
+  .sbox { display:flex; gap:6px; background:var(--input); border:2px solid var(--border);
+    border-radius:var(--rad); padding:4px; transition:.2s; }
+  .sbox:focus-within { border-color:var(--acc); box-shadow:0 0 0 3px var(--glow); }
+  .sbox input { flex:1; background:none; border:none; outline:none;
+    color:var(--text); font-size:16px; padding:10px; min-width:0;
+    -webkit-appearance:none; border-radius:0; }
+  .sbox input::placeholder { color:var(--text2); opacity:.5; }
+  .sbox button { background:linear-gradient(135deg,var(--acc),#5b4bd5); color:#fff; border:none;
+    border-radius:calc(var(--rad)-4px); padding:10px 16px; font-size:15px; font-weight:600;
+    cursor:pointer; white-space:nowrap; display:flex; align-items:center; gap:4px; transition:.15s; }
+  .sbox button:active { transform:scale(.97); }
+  .sbox button:disabled { opacity:.5; }
+
+  /* ── 快捷标签（可滚动） ── */
+  .quick { display:flex; gap:6px; margin-top:8px; overflow-x:auto; -webkit-overflow-scrolling:touch;
+    scrollbar-width:none; padding-bottom:2px; }
+  .quick::-webkit-scrollbar { display:none; }
+  .quick span { flex-shrink:0; background:var(--card); color:var(--text2); border:1px solid var(--border);
+    border-radius:16px; padding:5px 12px; font-size:12px; cursor:pointer; transition:.15s; white-space:nowrap; }
+  .quick span:active { color:var(--acc2); border-color:var(--acc); }
+
+  /* ── 状态栏 ── */
+  .status { max-width:600px; margin:0 auto; padding:0 14px 8px;
+    display:none; justify-content:space-between; font-size:12px; color:var(--text2); align-items:center; }
+  .status .n { color:var(--acc2); font-weight:600; }
+
+  /* ── 筛选（移动端友好：下拉菜单） ── */
+  .filters { max-width:600px; margin:0 auto 10px; padding:0 14px;
+    display:none; flex-wrap:wrap; gap:8px; }
+  .filters select { flex:1; min-width:80px; background:var(--input); border:1px solid var(--border);
+    color:var(--text); border-radius:6px; padding:7px 6px; font-size:13px; outline:none;
+    -webkit-appearance:none; appearance:none; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%237070a0' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat:no-repeat; background-position:right 6px center; padding-right:24px; }
+  .filters select:focus { border-color:var(--acc); }
+
+  /* ── 加载 ── */
+  .load { display:none; text-align:center; padding:30px; }
+  .load.on { display:block; }
+  .spin { width:28px; height:28px; border:3px solid var(--border); border-top-color:var(--acc);
+    border-radius:50%; animation:s .7s linear infinite; margin:0 auto 8px; }
+  @keyframes s { to { transform:rotate(360deg); } }
+
+  /* ── 结果卡片（移动端优化） ── */
+  .res { max-width:620px; margin:0 auto; padding:0 14px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:var(--rad);
+    padding:12px 14px; margin-bottom:10px; transition:.15s; }
+  .card:active { background:var(--bg2); }
+  .card.top { border-left:3px solid var(--ok); }
+
+  .ch { display:flex; align-items:flex-start; gap:8px; margin-bottom:6px; }
+  .score { flex-shrink:0; background:linear-gradient(135deg,var(--acc),#5b4bd5); color:#fff;
+    border-radius:8px; padding:4px 8px; font-size:13px; font-weight:700; text-align:center; min-width:40px;
+    line-height:1.2; }
+  .score::after { content:"分"; display:block; font-size:9px; font-weight:400; opacity:.7; }
+  .score.lo { background:#3a3a50; opacity:.7; }
+  .ct { flex:1; min-width:0; }
+  .ctt { font-size:14px; font-weight:600; color:var(--text); line-height:1.4; word-break:break-word; }
+  .cd { font-size:11px; color:var(--text2); margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; }
+
+  .clink { display:flex; align-items:center; gap:6px; margin-bottom:6px; }
+  .clink span { flex:1; font-size:11px; color:var(--text2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+  .btn { flex-shrink:0; border:1px solid var(--border); border-radius:4px; padding:5px 10px; font-size:11px;
+    cursor:pointer; transition:.15s; background:transparent; color:var(--text2); white-space:nowrap; -webkit-tap-highlight-color:transparent; }
+  .btn:active { transform:scale(.95); }
+  .btn-open { border-color:var(--ok); color:var(--ok); font-weight:600; }
+  .btn-open:active { background:rgba(0,214,143,.1); }
+  .btn-copy:active { border-color:var(--acc); color:var(--acc2); }
+
+  /* 标签 */
+  .tags { display:flex; gap:4px; flex-wrap:wrap; }
+  .tag { font-size:10px; padding:2px 6px; border-radius:3px; font-weight:500; line-height:1.4; }
+  .tq { background:rgba(0,214,143,.1); color:var(--ok); }
+  .tf { background:rgba(84,160,255,.1); color:var(--info); }
+  .ts { background:rgba(255,170,0,.1); color:var(--warn); }
+  .tl { background:rgba(167,139,250,.1); color:#a78bfa; }
+  .td { background:rgba(255,255,255,.05); color:var(--text2); }
+  .tr { background:rgba(108,92,231,.1); color:var(--acc2); }
+  .tx { background:rgba(255,255,255,.04); color:var(--text2); }
+  .tm { background:rgba(255,107,107,.1); color:var(--err); font-size:9px; }
+  .tv { background:rgba(0,214,143,.15); color:var(--ok); }
+  .te { background:rgba(255,107,107,.12); color:var(--err); text-decoration:line-through; }
+
+  /* 空 */
+  .empty { text-align:center; padding:50px 16px; color:var(--text2); }
+  .empty .e { font-size:36px; margin-bottom:10px; opacity:.5; }
+
+  /* Toast */
+  .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); z-index:100;
+    background:var(--card); border:1px solid var(--ok); color:var(--text);
+    padding:8px 20px; border-radius:20px; font-size:13px; opacity:0; transition:opacity .3s; pointer-events:none; }
+  .toast.show { opacity:1; }
+
+  /* 底部导航 */
+  .bn { position:fixed; bottom:0; left:0; right:0; z-index:60;
+    background:var(--card); border-top:1px solid var(--border); display:flex;
+    padding:6px 16px calc(6px + var(--safe-bottom)); gap:8px; }
+  .bn .bn-btn { flex:1; background:var(--acc); color:#fff; border:none; border-radius:var(--rads);
+    padding:10px; font-size:13px; font-weight:600; cursor:pointer; text-align:center; transition:.15s;
+    -webkit-tap-highlight-color:transparent; }
+  .bn .bn-btn:active { transform:scale(.97); }
+  .bn .bn-btn.s { background:transparent; border:1px solid var(--border); color:var(--text2); }
+  .bn .bn-btn.s.active { border-color:var(--acc); color:var(--acc2); }
+
+  @media (min-width:600px) {
+    .bn { display:none; }
+    .card { padding:14px 18px; }
+    .card:hover { background:var(--bg2); border-color:var(--acc); }
+    .ctt { font-size:15px; }
+    .clink span { font-size:12px; }
+  }
+
+  ::-webkit-scrollbar { width:3px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+  ::-webkit-scrollbar-thumb { background:var(--border); border-radius:2px; }
+</style>
+</head>
+<body>
+
+<div class="top"><div class="logo">夸克搜</div><div class="sub">全网检索 · 中英双语 · 手机电脑通用</div></div>
+
+<div class="search-bar">
+  <div class="sbox">
+    <input type="search" id="q" placeholder="搜电影/剧集/教程/软件…" autocomplete="off" autofocus enterkeyhint="search">
+    <button id="btn" onclick="go()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>搜</button>
+  </div>
+  <div class="quick">
+    <span onclick="qs(this)">流浪地球2 4K</span><span onclick="qs(this)">庆余年 第二季</span>
+    <span onclick="qs(this)">Python教程</span><span onclick="qs(this)">Photoshop 2026</span>
+    <span onclick="qs(this)">Inception 2010</span><span onclick="qs(this)">考研数学</span>
+  </div>
+</div>
+
+<div class="status" id="st"><span>搜"<strong id="sq"></strong>"，<strong class="n" id="sc"></strong>条结果</span><span style="opacity:.5"><span id="stm"></span>s</span></div>
+
+<div class="filters" id="fl">
+  <select id="fq" onchange="apply()"><option value="">全部清晰度</option></select>
+  <select id="flg" onchange="apply()"><option value="">全部语言</option></select>
+  <select id="ff" onchange="apply()"><option value="">全部格式</option></select>
+  <select id="fs" onchange="apply()">
+    <option value="score">推荐度↓</option><option value="refs">引用数↓</option><option value="time">时间↓</option>
+  </select>
+</div>
+
+<div class="load" id="ld"><div class="spin"></div><div>全网检索中…</div><div style="font-size:10px;color:var(--text2);margin-top:4px">中英文双语搜索 · 结果自动缓存</div></div>
+
+<div class="res" id="rs"></div>
+
+<div class="bn" id="bnav">
+  <button class="bn-btn s active" onclick="toggleValidate()" id="btnv">🔗 快速模式</button>
+  <button class="bn-btn" onclick="window.scrollTo({top:0,behavior:'smooth'});document.getElementById('q').focus()">🔍 搜新资源</button>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let data=[], validateMode=false;
+
+function go(){
+  const q=document.getElementById('q').value.trim();
+  if(!q)return;
+  document.getElementById('ld').classList.add('on');
+  document.getElementById('st').style.display='none';
+  document.getElementById('fl').style.display='none';
+  document.getElementById('rs').innerHTML='';
+  document.getElementById('btn').disabled=true;
+
+  const params=new URLSearchParams({q,validate:validateMode?'true':'false',filter_expired:'true'});
+  fetch('/api/search?'+params).then(r=>r.json()).then(d=>{
+    data=d.results||[];
+    document.getElementById('ld').classList.remove('on');
+    document.getElementById('btn').disabled=false;
+    document.getElementById('st').style.display='flex';
+    document.getElementById('fl').style.display=data.length?'flex':'none';
+    document.getElementById('sq').textContent=d.query;
+    document.getElementById('sc').textContent=d.total;
+    document.getElementById('stm').textContent=d.elapsed+(d.cached?'⚡':'');
+    buildFilters(d.filters||{});
+    apply();
+  }).catch(e=>{
+    document.getElementById('ld').classList.remove('on');
+    document.getElementById('btn').disabled=false;
+    document.getElementById('rs').innerHTML='<div class="empty"><div class="e">⚠️</div><div>搜索失败，请重试</div></div>';
+  });
+}
+
+function qs(el){ document.getElementById('q').value=el.textContent; go(); }
+function toggleValidate(){
+  validateMode=!validateMode;
+  const b=document.getElementById('btnv');
+  b.textContent=validateMode?'🛡️ 校验模式':'🔗 快速模式';
+  b.classList.toggle('active',validateMode);
+}
+
+function buildFilters(f){
+  ['fq','flg','ff'].forEach(id=>{
+    const s=document.getElementById(id);
+    const key=id==='fq'?'qualities':id==='flg'?'languages':'formats';
+    const labels={fq:{'4K':'🎬4K','1080P':'📺1080P','720P':'📱720P','蓝光':'💿蓝光','HDR':'✨HDR'},
+                   flg:{'普通话':'🇨🇳普','粤语':'🇭🇰粤','英语':'🇬🇧英','日语':'🇯🇵日','韩语':'🇰🇷韩'}};
+    s.innerHTML='<option value="">全部'+(id==='fq'?'清晰度':id==='flg'?'语言':'格式')+'</option>';
+    (f[key]||[]).forEach(v=>{s.innerHTML+=`<option value="${v}">${(labels[id]||{})[v]||v}</option>`});
+  });
+}
+
+function apply(){
+  let r=[...data];
+  const fq=document.getElementById('fq').value,fl=document.getElementById('flg').value;
+  const ff=document.getElementById('ff').value,fs=document.getElementById('fs').value;
+  if(fq)r=r.filter(x=>x.quality===fq);
+  if(fl)r=r.filter(x=>x.language===fl);
+  if(ff)r=r.filter(x=>x.format===ff);
+  if(fs==='refs')r.sort((a,b)=>b.ref_count-a.ref_count);
+  else if(fs==='time')r.sort((a,b)=>(b.publish_date||'').localeCompare(a.publish_date||''));
+  else r.sort((a,b)=>b.score-a.score);
+  document.getElementById('sc').textContent=r.length;
+  render(r);
+}
+
+function render(r){
+  const c=document.getElementById('rs');
+  if(!r.length){c.innerHTML='<div class="empty"><div class="e">🔍</div><div>未找到，试试更精确的关键词</div></div>';return;}
+  c.innerHTML=r.map(x=>{
+    const tags=[];
+    if(x.is_film)tags.push('<span class="tag tm">影视</span>');
+    if(x.valid)tags.push('<span class="tag tv">有效</span>');else tags.push('<span class="tag te">失效</span>');
+    if(x.quality)tags.push(`<span class="tag tq">${x.quality}</span>`);
+    if(x.format)tags.push(`<span class="tag tf">${x.format}</span>`);
+    if(x.size)tags.push(`<span class="tag ts">${x.size}</span>`);
+    if(x.language)tags.push(`<span class="tag tl">${x.language}</span>`);
+    if(x.publish_date)tags.push(`<span class="tag td">${x.publish_date}</span>`);
+    if(x.ref_count>1)tags.push(`<span class="tag tr">${x.ref_count}引用</span>`);
+    tags.push(`<span class="tag tx">📡${x.source}</span>`);
+    (x.tags||[]).forEach(t=>tags.push(`<span class="tag tx">${t}</span>`));
+    return `<div class="card${x.score>=80?' top':''}">
+      <div class="ch"><div class="score${x.score<50?' lo':''}">${x.score}</div>
+        <div class="ct"><div class="ctt">${e(x.title)}</div>
+        ${x.description?`<div class="cd">${e(x.description)}</div>`:''}</div></div>
+      <div class="clink"><span>${e(x.link)}</span>
+        <button class="btn btn-open" onclick="open('${e(x.link)}')">打开夸克</button>
+        <button class="btn btn-copy" onclick="cpy('${e(x.link)}',this)">复制</button></div>
+      <div class="tags">${tags.join('')}</div></div>`;}).join('');
+}
+function open(l){ window.open(l,'_blank'); }
+function cpy(l,btn){
+  navigator.clipboard.writeText(l).then(()=>{
+    btn.textContent='已复制';btn.style.color='var(--ok)';btn.style.borderColor='var(--ok)';
+    toast('已复制，粘贴到夸克APP即可');
+    setTimeout(()=>{btn.textContent='复制';btn.style.color='';btn.style.borderColor='';},2000);
+  }).catch(()=>toast('复制失败'));
+}
+function toast(m){
+  const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'),2000);
+}
+function e(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter')go();});
+</script>
+</body>
+</html>
