@@ -345,7 +345,7 @@ async def api_search(q:str=Query(...,min_length=1)):
                      "languages":sorted(set(r.language for r in results if r.language)),
                      "formats":sorted(set(r.fmt for r in results if r.fmt))},
           "results":[r.td() for r in results]}
-    cset(ck,resp,ttl=5)
+    cset(ck,resp,t=5)
     return JSONResponse(resp)
 
 @app.get("/api/health")
