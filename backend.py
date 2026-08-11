@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-夸克网盘资源搜索器 v7 - 最终稳定版
-搜索源: pansearch.me(主力) + 夸克搜索站 + 已知资源站直搜
+夸克网盘资源搜索器 v8
+- 标题正确提取（从 pansearch.me 卡片内容）
+- 深度校验开关
+- 移动端优化打开夸克
 """
-import asyncio, re, hashlib, time, os, threading
+import asyncio, re, hashlib, time, os, secrets, threading
 from datetime import datetime, timedelta
 from urllib.parse import quote
 from dataclasses import dataclass, field
@@ -16,12 +18,12 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
-import uvicorn, secrets
+import uvicorn
 
 app = FastAPI(title="夸克网盘资源搜索器")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-ACCESS_PASSWORD = os.environ.get("ACCESS_PASSWORD", "").strip()
+ACCESS_PASSWORD = os.environ.get("ACCESS_PASSWORD", "").strip()  # noqa
 VALID_TOKENS = set()
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -31,7 +33,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if path in ("/api/health", "/api/login"): return await call_next(request)
         token = request.cookies.get("quark_token") or request.query_params.get("token")
         if token and token in VALID_TOKENS: return await call_next(request)
-        if path.startswith("/api/"): return JSONResponse({"error": "unauthorized"}, 401)
+        if path.startswith("/api/"):
+            return JSONResponse({"error": "unauthorized"}, 401)
         return HTMLResponse(LOGIN_HTML, 401)
 
 app.add_middleware(AuthMiddleware)
@@ -56,15 +59,15 @@ def cset(k, d, t=5):
             old = min(_cache, key=lambda k: _cache[k]['e']); del _cache[old]
 
 # 元数据
-Q = [(r'\b(4K|2160[Pp]|UHD)\b','4K'),(r'\b(1080[Pp]|FHD)\b','1080P'),(r'\b(720[Pp])\b','720P'),
+Q = [(r'\b(4K|2160P|UHD)\b','4K'),(r'\b(1080P|FHD)\b','1080P'),(r'\b(720P)\b','720P'),
      (r'\b(蓝光|BluRay|BD|REMUX)\b','蓝光'),(r'\b(HDR|杜比视界|DV)\b','HDR')]
 F = [(r'\.mkv\b','MKV'),(r'\.mp4\b','MP4'),(r'\.avi\b','AVI'),(r'\.iso\b','ISO'),(r'\.(rar|zip|7z)\b','压缩包')]
 L = [(r'(粤语|广东话|Cantonese)','粤语'),(r'(英语|English)','英语'),(r'(日语|Japanese)','日语'),
      (r'(韩语|Korean)','韩语'),(r'(国语|普通话|中文配音|简中|繁中)','普通话')]
 S = re.compile(r'(\d+\.?\d*)\s*(GB|TB|MB|G|T|M)\b', re.I)
 DT = re.compile(r'(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})')
-TG = [(r'(中字|内嵌|中文字幕)','中字'),(r'(杜比|Dolby|全景声)','杜比音效'),(r'(合集|全季)','合集'),
-      (r'(完结|全\d+集)','已完结'),(r'(高码|BDRip|WEB-DL)','高清压制')]
+TG = [(r'(中字|内嵌|中文字幕)','中字'),(r'(杜比|全景声)','杜比音效'),(r'(合集|全季)','合集'),
+      (r'(完结|全\d)','已完结'),(r'(高码|BDRip|WEB-DL)','高清压制')]
 
 def meta(text):
     return {
@@ -82,13 +85,13 @@ class QR:
     title:str; link:str; quality:str=""; fmt:str=""; size:str=""; language:str=""
     publish_date:str=""; description:str=""; is_film:bool=False; score:int=50
     extra_tags:list=field(default_factory=list); source:str=""; source_url:str=""
-    ref_count:int=1; valid:bool=True
+    ref_count:int=1; valid:bool=True; status_reason:str="URL可达"
     def td(self):
         return {"title":self.title,"link":self.link,"quality":self.quality,"format":self.fmt,
                 "size":self.size,"language":self.language,"publish_date":self.publish_date,
                 "description":self.description,"is_film":self.is_film,"score":self.score,
                 "ref_count":self.ref_count,"valid":self.valid,"tags":self.extra_tags,
-                "source":self.source,"source_url":self.source_url}
+                "status_reason":self.status_reason,"source":self.source,"source_url":self.source_url}
 
 QB={k:v for k,v in [('4K',25),('蓝光',22),('HDR',20),('1080P',15),('720P',8)]}
 FB={k:v for k,v in [('MKV',10),('MP4',8),('ISO',12)]}
@@ -102,56 +105,130 @@ def sscore(r):
     if r.ref_count>1: s+=min(r.ref_count*3,15)
     return min(max(s,0),100)
 
-# ════════════════ 核心: 提取夸克链接 ════════════════
-def extract_links(url, query="", timeout=8):
-    """从指定 URL 提取所有夸克链接"""
+# ════════════════ 核心: 提取夸克链接 + 标题 ════════════════
+def extract_pansearch_data(url, query="", timeout=10):
+    """从 pansearch.me 提取标题、链接、发布时间等"""
     rv = []
     try:
         resp = cffi_requests.get(url, headers=HDRS, impersonate='chrome120', timeout=timeout)
         if resp.status_code != 200 or len(resp.text) < 300: return rv
         soup = BeautifulSoup(resp.text, 'html.parser')
-        page_title = soup.title.get_text(strip=True) if soup.title else ""
+        text = resp.text
 
-        # 从整个页面提取 Quark 链接的上下文
-        for m in QUARK_LINK_RE.finditer(resp.text):
-            link = m.group(1)
-            start = max(0, m.start() - 100)
-            end = min(len(resp.text), m.end() + 100)
-            context = resp.text[start:end].replace('\n', ' ').strip()[:200]
+        # 找所有 resource-link 元素
+        for a in soup.find_all('a', class_='resource-link', href=re.compile(r'pan\.quark\.cn/s/')):
+            link = a.get('href', '').strip()
+            if not link or 'pan.quark.cn/s/' not in link: continue
 
-            # 在 BeautifulSoup 中找上下文
-            parent = None
-            for a in soup.find_all('a', href=re.compile(re.escape(link[:30]))):
-                p = a.find_parent(['div','li','td','p','article','section','h3','h4'])
-                if p:
-                    parent = p.get_text(strip=True)[:300]
-                    break
-
-            full_context = f"{page_title}\n{parent or context}"
+            # 标题提取：HTML 格式 "1、庆余年:<a ...>URL</a>;"
             title = ""
-            if parent:
-                # 从 parent 中提取更好的标题
-                for h_tag in ['h3', 'h2', 'h1', 'strong', 'b']:
-                    h = soup.find(h_tag)
-                    if not h: continue
-                    htxt = h.get_text(strip=True)
-                    for a in h.find_all('a', href=re.compile(re.escape(link[:30]))):
-                        title = htxt; break
-                    if title: break
+            for sibling in a.previous_siblings:
+                if isinstance(sibling, str):
+                    txt = sibling.strip()
+                    if txt and len(txt) > 1:
+                        clean = re.sub(r'^[\d]+[、\.\s]*', '', txt).rstrip(':').strip()
+                        if clean:
+                            title = clean
+                            break
+
+            # 备用方案：从父容器
             if not title:
-                title = page_title or query
+                parent = a.find_parent('div', class_='whitespace-pre-wrap')
+                if parent:
+                    full_text = parent.get_text(' ', strip=True)
+                    pos = full_text.find(link[:30])
+                    if pos > 0:
+                        before = re.sub(r'^[\d]+[、\.\s]+', '', full_text[:pos]).rstrip(':').strip()
+                        parts = re.split(r'[。；;]', before)
+                        if parts:
+                            title = parts[-1].strip()[:80]
+
+            if not title or title == link:
+                title = query + " 资源"
+
+            # 提取发布时间
+            date = ""
+            link_pos = text.find(link)
+            if link_pos > 0:
+                before = text[max(0, link_pos-3000):link_pos]
+                dm = re.search(r'(20\d{2}[-年]\d{1,2}[-月]\d{1,2})', before)
+                if dm:
+                    d = dm.group(1)
+                    d = re.sub(r'年', '-', d).replace('月', '-').replace('日', '').replace('号', '')
+                    date = d
+
+            # 提取上下文
+            ctx_start = max(0, text.find(link) - 150)
+            ctx_end = min(len(text), text.find(link) + 100)
+            context = re.sub(r'<[^>]+>', ' ', text[ctx_start:ctx_end]).strip()[:300]
 
             rv.append({
-                'link': link, 'context': full_context, 'title': title,
+                'link': link,
+                'title': title[:80],
+                'context': context,
+                'date': date,
                 'source': url.split('/')[2] if '//' in url else url,
                 'source_url': url,
             })
         return rv
-    except: return rv
+    except Exception as e:
+        print(f"extract_pansearch_data err: {e}")
+        return rv
 
-# ════════════════ 搜索源 1: pansearch.me (主力) ════════════════
+
+def extract_links(url, query="", timeout=8):
+    return extract_pansearch_data(url, query, timeout)
+
+
+def check_share_valid(link, timeout=10):
+    """深度验证夸克分享是否有效"""
+    try:
+        resp = cffi_requests.get(link, headers={
+            **HDRS,
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-Mode': 'navigate',
+        }, impersonate='chrome120', timeout=timeout)
+
+        if resp.status_code != 200:
+            return False, "页面无法访问"
+
+        text = resp.text
+        invalid_markers = [
+            '分享已失效', '分享已过期', '分享不存在', '分享已删除',
+            '文件不存在', '分享已被取消', '该分享不存在',
+            '链接已失效', '资源不存在', '已下线', '已被取消',
+            'expired',
+        ]
+        for marker in invalid_markers:
+            if marker in text:
+                return False, f"失效:{marker}"
+
+        if len(text) < 500:
+            return False, "页面异常"
+
+        return True, "URL可达"
+    except Exception as e:
+        return False, f"检查失败:{str(e)[:30]}"
+
+
+def validate_results(results):
+    """深度验证所有夸克链接"""
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futs = {ex.submit(check_share_valid, r.link): i for i, r in enumerate(results)}
+        for f in as_completed(futs, timeout=20):
+            i = futs[f]
+            try:
+                valid, reason = f.result(timeout=15)
+                results[i].valid = valid
+                results[i].status_reason = reason
+            except:
+                results[i].valid = True
+                results[i].status_reason = "检查超时"
+    return results
+
+
+# ════════════════ 搜索源 ════════════════
 def search_pansearch(query):
-    """pansearch.me 夸克搜索站"""
     rr, seen = [], set()
     url = f'https://www.pansearch.me/search?keyword={quote(query)}'
     page_results = extract_links(url, query, 12)
@@ -160,13 +237,10 @@ def search_pansearch(query):
         if cl not in seen: seen.add(cl); pr['link'] = cl; rr.append(pr)
     return rr
 
-# ════════════════ 搜索源 2: 直接搜索已知资源站 ════════════════
+
 def search_resource_sites(query):
-    """直接搜索已知资源站首页/分类页"""
     rr, seen = [], set()
     enc = quote(query)
-
-    # 这些站点有搜索功能，且页面是静态 HTML
     sites = [
         f'https://www.yunpanziyuan.xyz/search.php?mod=forum&searchsubmit=yes&kw={enc}',
         f'https://yunpans.com/search.php?mod=forum&searchsubmit=yes&kw={enc}',
@@ -174,50 +248,38 @@ def search_resource_sites(query):
         f'https://www.aipanso.com/search?k={enc}',
         f'https://xiaokupan.com/search?keyword={enc}',
     ]
-
     with ThreadPoolExecutor(max_workers=5) as ex:
         futs = {}
         for url in sites:
             futs[ex.submit(extract_links, url, query, 8)] = url
-
         for f in as_completed(futs, timeout=12):
             try:
                 for pr in f.result(timeout=10):
                     cl = pr['link'].split('#')[0].rstrip('/')
                     if cl not in seen: seen.add(cl); pr['link'] = cl; rr.append(pr)
             except: continue
-
     return rr
 
-# ════════════════ 搜索源 3: 已知资源站内部搜索 ════════════════
+
 def search_known_pages(query):
-    """从已知资源站获取搜索页结果，然后抓取详情页"""
     rr, seen = [], set()
     enc = quote(query)
-
-    # 直接搜索资源站的搜索结果列表，提取帖子链接，再抓帖子详情
     forum_searches = [
         (f'https://www.yunpanziyuan.xyz/search.php?mod=forum&searchsubmit=yes&kw={enc}', 'yunpanziyuan.xyz'),
         (f'https://www.yunpans.com/search.php?mod=forum&searchsubmit=yes&kw={enc}', 'yunpans.com'),
     ]
-
     for search_url, site_name in forum_searches:
         try:
             resp = cffi_requests.get(search_url, headers=HDRS, impersonate='chrome120', timeout=8)
             if resp.status_code != 200 or len(resp.text) < 500: continue
-
             soup = BeautifulSoup(resp.text, 'html.parser')
             thread_urls = []
             base_url = '/'.join(search_url.split('/')[:3])
-
             for a in soup.find_all('a', href=True):
                 h = a['href']
                 if any(p in h for p in ['thread-', 'viewthread', '/d/', '/t/', 'forum.php']):
                     full_url = h if h.startswith('http') else base_url + h
-                    if full_url not in thread_urls:
-                        thread_urls.append(full_url)
-
-            # 抓取每个帖子详情页
+                    if full_url not in thread_urls: thread_urls.append(full_url)
             with ThreadPoolExecutor(max_workers=4) as ex:
                 futs = {ex.submit(extract_links, tu, query, 6): tu for tu in thread_urls[:5]}
                 for f in as_completed(futs, timeout=10):
@@ -227,10 +289,9 @@ def search_known_pages(query):
                             if cl not in seen: seen.add(cl); pr['link'] = cl; rr.append(pr)
                     except: continue
         except: continue
-
     return rr
 
-# ════════════════ 聚合 ════════════════
+
 def search_all(query):
     all_r, seen = [], set()
     with ThreadPoolExecutor(max_workers=4) as ex:
@@ -247,6 +308,7 @@ def search_all(query):
             except: pass
     return all_r
 
+
 def process(raw, query):
     seen = OrderedDict(); ref = Counter()
     for item in raw:
@@ -255,11 +317,13 @@ def process(raw, query):
         lk = lk.split('?')[0].rstrip('/'); key = hashlib.md5(lk.encode()).hexdigest(); ref[key] += 1
         title = item.get('title',''); ctx = item.get('context','')
         src = item.get('source',''); surl = item.get('source_url','')
-        full = f"{title} {query}\n{ctx}"; m = meta(full)
+        date = item.get('date','')
+        full = f"{title} {query}\n{ctx}"; meta_data = meta(full)
         desc = full[:200]
         qr = QR(title=title or full[:100] or query, link=lk, source=src, source_url=surl,
-                quality=m['quality'], fmt=m['fmt'], size=m['size'], language=m['lang'],
-                publish_date=m['date'], description=desc[:200], is_film=m['film'], extra_tags=m['tags'])
+                quality=meta_data['quality'], fmt=meta_data['fmt'], size=meta_data['size'],
+                language=meta_data['lang'], publish_date=date or meta_data['date'],
+                description=desc[:200], is_film=meta_data['film'], extra_tags=meta_data['tags'])
         if key in seen:
             ex = seen[key]
             for a in ['quality','fmt','size','language','publish_date','description']:
@@ -271,6 +335,7 @@ def process(raw, query):
         if k in seen: seen[k].ref_count = c
     for r in seen.values(): r.score = sscore(r)
     return sorted(seen.values(), key=lambda x: x.score, reverse=True)
+
 
 # ════════════════ API ════════════════
 LOGIN_HTML = """<!DOCTYPE html>
@@ -323,11 +388,12 @@ async def login(request:Request):
     resp.set_cookie("quark_token",token,httponly=True,max_age=86400*365,samesite="lax")
     return resp
 
+
 @app.get("/api/search")
-async def api_search(q:str=Query(...,min_length=1)):
+async def api_search(q:str=Query(...,min_length=1), deep_check:bool=Query(False, description="深度校验链接有效性")):
     if not q.strip(): return JSONResponse({"error":"请输入"},400)
     query=q.strip(); t0=time.time()
-    ck=hashlib.md5(f"v7_{query}".encode()).hexdigest()
+    ck=hashlib.md5(f"v8_{query}_{deep_check}".encode()).hexdigest()
     cached=cget(ck)
     if cached:
         cached['cached']=True; cached['elapsed']=round(time.time()-t0,3)
@@ -337,10 +403,18 @@ async def api_search(q:str=Query(...,min_length=1)):
         raw=await asyncio.wait_for(loop.run_in_executor(None,search_all,query),timeout=28.0)
         results=process(raw,query)
     except: results=[]
+
+    if deep_check and results:
+        results=await loop.run_in_executor(None, validate_results, results)
+        for r in results: r.score = sscore(r)
+        results.sort(key=lambda x: x.score, reverse=True)
+
     elapsed=round(time.time()-t0,2)
     films=[r for r in results if r.is_film]
-    resp={"query":query,"total":len(results),"elapsed":elapsed,"cached":False,
-          "summary":{"影视资源":len(films),"其他资源":len(results)-len(films),"总计":len(results)},
+    valid_count = sum(1 for r in results if r.valid)
+    resp={"query":query,"total":len(results),"valid_count":valid_count,"elapsed":elapsed,"cached":False,
+          "summary":{"影视资源":len(films),"其他资源":len(results)-len(films),"总计":len(results),
+                     "有效链接":valid_count,"失效链接":len(results)-valid_count},
           "filters":{"qualities":sorted(set(r.quality for r in results if r.quality)),
                      "languages":sorted(set(r.language for r in results if r.language)),
                      "formats":sorted(set(r.fmt for r in results if r.fmt))},
@@ -348,14 +422,17 @@ async def api_search(q:str=Query(...,min_length=1)):
     cset(ck,resp,t=5)
     return JSONResponse(resp)
 
+
 @app.get("/api/health")
 async def health():
     return {"status":"ok","time":datetime.now().isoformat()}
+
 
 @app.get("/",response_class=HTMLResponse)
 async def index():
     path=os.path.join(os.path.dirname(os.path.abspath(__file__)),'templates','index.html')
     with open(path,'r',encoding='utf-8') as f: return f.read()
+
 
 if __name__=="__main__":
     port=int(os.environ.get("PORT",8899))
