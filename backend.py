@@ -528,16 +528,17 @@ async def api_search(
     validate: bool = Query(False, description="是否校验链接（默认关闭以加速）"),
     filter_expired: bool = Query(True),
     debug: bool = Query(False, description="返回调试信息"),
+    refresh: bool = Query(False, description="强制刷新，跳过缓存"),
 ):
     if not q.strip(): return JSONResponse({"error": "请输入"}, 400)
 
     query = q.strip()
     t0 = time.time()
 
-    # 检查缓存
-    ck = hashlib.md5(f"{query}_{validate}".encode()).hexdigest()
+    # 检查缓存（带版本号，部署后自动失效旧缓存）
+    ck = hashlib.md5(f"v2_{query}_{validate}".encode()).hexdigest()
     cached = cache_get(ck)
-    if cached:
+    if cached and not refresh:
         cached['cached'] = True
         cached['elapsed'] = round(time.time() - t0, 3)
         return JSONResponse(cached)
@@ -584,7 +585,7 @@ async def api_search(
         "results": [r.to_dict() for r in results],
     }
     if debug_info: resp['debug'] = debug_info
-    cache_set(ck, resp, ttl_minutes=15)
+    cache_set(ck, resp, ttl_minutes=5)
     return JSONResponse(resp)
 
 
