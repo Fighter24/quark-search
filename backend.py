@@ -5,7 +5,7 @@
 """
 import asyncio, re, hashlib, time, json, os, threading
 from datetime import datetime, timedelta
-from urllib.parse import quote
+from urllib.parse import quote, urlparse, parse_qs
 from dataclasses import dataclass, field
 from collections import OrderedDict, Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -241,14 +241,63 @@ PROMISING = ['网盘','夸克','quark','下载','资源','分享','链接','yunp
 def is_prom(result):
     return any(k in f"{result.get('href','')} {result.get('title','')} {result.get('body','')}".lower() for k in PROMISING)
 
-def search_ddgs(query):
+def ddg_html_search(query, region='cn-zh'):
+    """直接调用 DuckDuckGo HTML 接口搜索，绕开 ddgs 库"""
     try:
-        from ddgs import DDGS
-    except ImportError: return []
+        url = f'https://html.duckduckgo.com/html/?q={quote(query)}&kl={region}'
+        resp = cffi_requests.get(url, headers={
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Referer': 'https://duckduckgo.com/',
+        }, impersonate='chrome120', timeout=15)
+        if resp.status_code != 200 or len(resp.text) < 500:
+            return []
 
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        results = []
+        # DuckDuckGo HTML 版本的结果结构
+        for item in soup.select('.result, .web-result, .result__body'):
+            title_el = item.select_one('.result__title a, .result__a, h2 a')
+            snippet_el = item.select_one('.result__snippet, .result__snippet.js-result-snippet')
+            link_href = title_el.get('href', '') if title_el else ''
+
+            # 解包真实 URL
+            if 'uddg=' in link_href:
+                parsed = urlparse(link_href)
+                actual_url = parse_qs(parsed.query).get('uddg', [''])[0]
+            else:
+                actual_url = link_href
+
+            title = title_el.get_text(strip=True) if title_el else ''
+            snippet = snippet_el.get_text(strip=True) if snippet_el else ''
+
+            if actual_url and title:
+                results.append({'href': actual_url, 'title': title, 'body': snippet})
+
+        # 备用选择器（页面结构变化时）
+        if not results:
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                if 'uddg=' in href:
+                    parsed = urlparse(href)
+                    href = parse_qs(parsed.query).get('uddg', [href])[0]
+                title = a.get_text(strip=True)
+                if href.startswith('http') and title and len(title) > 10 and 'duckduckgo' not in href:
+                    results.append({'href': href, 'title': title, 'body': ''})
+
+        return results
+    except Exception as e:
+        print(f"DDG HTML err: {e}")
+        return []
+
+
+def search_ddgs(query):
+    """使用 ddgs 库搜索，失败则回退到直接 HTML 接口"""
     rr, seen_l, fetched = [], set(), set()
+    debug_log = []
 
-    # 多语言搜索查询（中文 + 英文），更多变体
+    # 多语言搜索查询（中文 + 英文）
     queries = [
         (f'{query} 夸克网盘', 'cn-zh'),
         (f'{query} 夸克网盘 4K', 'cn-zh'),
@@ -259,12 +308,30 @@ def search_ddgs(query):
         (f'{query} 夸克资源', 'cn-zh'),
     ]
 
-    all_res = []
-    for q, region in queries:
-        try:
-            results = list(DDGS().text(q, max_results=6, region=region))
-            all_res.extend(results)
-        except: continue
+    # 优先尝试 ddgs 库
+    try:
+        from ddgs import DDGS
+        all_res = []
+        for q, region in queries:
+            try:
+                results = list(DDGS().text(q, max_results=6, region=region))
+                all_res.extend(results)
+            except: continue
+        debug_log.append(f"ddgs: {len(all_res)}")
+    except Exception as e:
+        debug_log.append(f"ddgs_err: {str(e)[:30]}")
+        all_res = []
+
+    # 如果 ddgs 失败或返回空，用直接 HTML 接口
+    if len(all_res) < 3:
+        for q, region in queries[:4]:  # 只重试前 4 个
+            try:
+                html_results = ddg_html_search(q, region)
+                all_res.extend(html_results)
+            except: continue
+        debug_log.append(f"+html: {len(all_res)}")
+
+    print(f"DDG search total: {len(all_res)}")
 
     promising = [r for r in all_res if is_prom(r)]
 
@@ -412,12 +479,12 @@ def search_all(query):
         futs = {
             ex.submit(search_ddgs, query): 'ddgs',
             ex.submit(search_quark_sites, query): 'quark',
-            ex.submit(search_forums, query): 'forums',
             ex.submit(search_bing, query): 'bing',
+            ex.submit(search_forums, query): 'forums',
         }
-        for f in as_completed(futs, timeout=20):
+        for f in as_completed(futs, timeout=25):
             try:
-                for r in f.result(timeout=15):
+                for r in f.result(timeout=18):
                     cl = r['link'].rstrip('/')
                     if cl not in seen: seen.add(cl); all_r.append(r)
             except: pass
